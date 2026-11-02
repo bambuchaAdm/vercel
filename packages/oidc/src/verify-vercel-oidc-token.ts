@@ -1,9 +1,8 @@
-import {
-  createRemoteJWKSet,
-  jwtVerify,
-  type JWTVerifyOptions,
-  type JWTVerifyResult,
-  type JWTPayload,
+import type {
+  JWTVerifyOptions,
+  JWTVerifyResult,
+  JWTPayload,
+  JWTVerifyGetKey,
 } from 'jose';
 
 const VERCEL_OIDC_ISSUER = 'https://oidc.vercel.com';
@@ -11,7 +10,25 @@ const VERCEL_OIDC_JWKS_URL = new URL(
   'https://oidc.vercel.com/.well-known/jwks'
 );
 const DEFAULT_ALGORITHMS = ['RS256'];
-const VERCEL_OIDC_JWKS = createRemoteJWKSet(VERCEL_OIDC_JWKS_URL);
+
+// jose 6 is ESM-only, so it is loaded with a dynamic `import()` that works from
+// this CJS build. A static import would be a `require()` that fails with
+// ERR_REQUIRE_ESM on runtimes without `require(esm)`.
+let josePromise: Promise<typeof import('jose')> | undefined;
+let vercelOidcJwks: JWTVerifyGetKey | undefined;
+
+async function loadJose() {
+  josePromise ??= import('jose');
+  return josePromise;
+}
+
+async function getVercelOidcJwks(): Promise<JWTVerifyGetKey> {
+  if (!vercelOidcJwks) {
+    const { createRemoteJWKSet } = await loadJose();
+    vercelOidcJwks = createRemoteJWKSet(VERCEL_OIDC_JWKS_URL);
+  }
+  return vercelOidcJwks;
+}
 
 /** A verified token whose Vercel identity does not match the receiver. */
 class VercelOidcTokenValidationError extends TypeError {
@@ -86,10 +103,15 @@ export async function verifyVercelOidcToken<PayloadType = VercelOidcPayload>(
     );
   }
 
-  const result = await jwtVerify<PayloadType>(token, VERCEL_OIDC_JWKS, {
-    ...verifyOptions,
-    algorithms: algorithms ?? DEFAULT_ALGORITHMS,
-  });
+  const { jwtVerify } = await loadJose();
+  const result = await jwtVerify<PayloadType>(
+    token,
+    await getVercelOidcJwks(),
+    {
+      ...verifyOptions,
+      algorithms: algorithms ?? DEFAULT_ALGORITHMS,
+    }
+  );
 
   validateIssuer(result.payload.iss);
   validateClaim({
